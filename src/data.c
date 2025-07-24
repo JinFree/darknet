@@ -9,8 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern int check_mistakes;
-
 #define NUMCHARS 37
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -206,10 +204,6 @@ box_label *read_boxes(char *filename, int *n)
         char *new_line = "\n";
         fwrite(new_line, sizeof(char), strlen(new_line), fw);
         fclose(fw);
-        if (check_mistakes) {
-            printf("\n Error in read_boxes() \n");
-            getchar();
-        }
 
         *n = 0;
         return boxes;
@@ -409,7 +403,6 @@ int fill_truth_detection(const char *path, int num_boxes, int truth_size, float 
             printf("\n Wrong annotation: class_id = %d. But class_id should be [from 0 to %d], file: %s \n", id, (classes-1), labelpath);
             sprintf(buff, "echo %s \"Wrong annotation: class_id = %d. But class_id should be [from 0 to %d]\" >> bad_label.list", labelpath, id, (classes-1));
             system(buff);
-            if (check_mistakes) getchar();
             ++sub;
             continue;
         }
@@ -424,7 +417,6 @@ int fill_truth_detection(const char *path, int num_boxes, int truth_size, float 
             sprintf(buff, "echo %s \"Wrong annotation: x = 0 or y = 0\" >> bad_label.list", labelpath);
             system(buff);
             ++sub;
-            if (check_mistakes) getchar();
             continue;
         }
         if (x <= 0 || x > 1 || y <= 0 || y > 1) {
@@ -432,7 +424,6 @@ int fill_truth_detection(const char *path, int num_boxes, int truth_size, float 
             sprintf(buff, "echo %s \"Wrong annotation: x = %f, y = %f\" >> bad_label.list", labelpath, x, y);
             system(buff);
             ++sub;
-            if (check_mistakes) getchar();
             continue;
         }
         if (w > 1) {
@@ -440,14 +431,12 @@ int fill_truth_detection(const char *path, int num_boxes, int truth_size, float 
             sprintf(buff, "echo %s \"Wrong annotation: w = %f\" >> bad_label.list", labelpath, w);
             system(buff);
             w = 1;
-            if (check_mistakes) getchar();
         }
         if (h > 1) {
             printf("\n Wrong annotation: h = %f, file: %s \n", h, labelpath);
             sprintf(buff, "echo %s \"Wrong annotation: h = %f\" >> bad_label.list", labelpath, h);
             system(buff);
             h = 1;
-            if (check_mistakes) getchar();
         }
         if (x == 0) x += lowest_w;
         if (y == 0) y += lowest_h;
@@ -1050,21 +1039,18 @@ void blend_truth_mosaic(float *new_truth, int boxes, int truth_size, float *old_
 #include "http_stream.h"
 
 data load_data_detection(int n, char **paths, int m, int w, int h, int c, int boxes, int truth_size, int classes, int use_flip, int use_gaussian_noise, int use_blur, int use_mixup,
-    float jitter, float resize, float hue, float saturation, float exposure, int mini_batch, int track, int augment_speed, int letter_box, int mosaic_bound, int contrastive, int contrastive_jit_flip, int show_imgs)
+    float jitter, float resize, float hue, float saturation, float exposure, int mini_batch, int track, int augment_speed, int letter_box, int mosaic_bound, int contrastive, int contrastive_jit_flip, int contrastive_color, int show_imgs)
 {
     const int random_index = random_gen();
     c = c ? c : 3;
 
     if (use_mixup == 2 || use_mixup == 4) {
         printf("\n cutmix=1 - isn't supported for Detector (use cutmix=1 only for Classifier) \n");
-        if (check_mistakes) getchar();
         if(use_mixup == 2) use_mixup = 0;
         else use_mixup = 3;
     }
     if (use_mixup == 3 && letter_box) {
-        //printf("\n Combination: letter_box=1 & mosaic=1 - isn't supported, use only 1 of these parameters \n");
-        //if (check_mistakes) getchar();
-        //exit(0);
+        error("Combination: letter_box=1 & mosaic=1 - isn't supported, use only 1 of these parameters", DARKNET_LOC);
     }
     if (random_gen() % 2 == 0) use_mixup = 0;
     int i;
@@ -1111,9 +1097,6 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
             if (src == NULL) {
                 printf("\n Error in load_data_detection() - OpenCV \n");
                 fflush(stdout);
-                if (check_mistakes) {
-                    getchar();
-                }
                 continue;
             }
 
@@ -1151,9 +1134,12 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
 
                 r_scale = random_float();
 
-                dhue = rand_uniform_strong(-hue, hue);
-                dsat = rand_scale(saturation);
-                dexp = rand_scale(exposure);
+                if (!contrastive || contrastive_color || i % 2 == 0)
+                {
+                    dhue = rand_uniform_strong(-hue, hue);
+                    dsat = rand_scale(saturation);
+                    dexp = rand_scale(exposure);
+                }
 
                 if (use_blur) {
                     int tmp_blur = rand_int(0, 2);  // 0 - disable, 1 - blur background, 2 - blur the whole image
@@ -1234,6 +1220,15 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
 
             int swidth = ow - pleft - pright;
             int sheight = oh - ptop - pbot;
+
+            if (swidth <=  0 || sheight <= 0 || (ow - pleft) <= 0 || (oh - ptop) <= 0 ) {
+                printf("\n WARNING: invalid resize. Resetting swidth: %d , sheight:  %d, pleft: %d, ptop: %d \n", dw, dh, 0 ,0);
+                printf("\n Original values: \n swidth = %d, sheight = %d, pleft = %d, pright = %d, ptop = %d, pbot = %d, ow = %d, oh = %d \n", swidth, sheight, pleft, pright, ptop, pbot, ow, oh);
+                swidth = ow;
+                sheight = oh;
+                pleft = 0;
+                ptop = 0;
+            }
 
             float sx = (float)swidth / ow;
             float sy = (float)sheight / oh;
@@ -1370,7 +1365,7 @@ void blend_images(image new_img, float alpha, image old_img, float beta)
 }
 
 data load_data_detection(int n, char **paths, int m, int w, int h, int c, int boxes, int truth_size, int classes, int use_flip, int gaussian_noise, int use_blur, int use_mixup,
-    float jitter, float resize, float hue, float saturation, float exposure, int mini_batch, int track, int augment_speed, int letter_box, int mosaic_bound, int contrastive, int contrastive_jit_flip, int show_imgs)
+    float jitter, float resize, float hue, float saturation, float exposure, int mini_batch, int track, int augment_speed, int letter_box, int mosaic_bound, int contrastive, int contrastive_jit_flip, int contrastive_color, int show_imgs)
 {
     const int random_index = random_gen();
     c = c ? c : 3;
@@ -1381,12 +1376,10 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
 
     //assert(use_mixup < 2);
     if (use_mixup == 2) {
-        printf("\n cutmix=1 - isn't supported for Detector \n");
-        exit(0);
+        error("cutmix=1 - isn't supported for Detector", DARKNET_LOC);
     }
     if (use_mixup == 3 || use_mixup == 4) {
-        printf("\n mosaic=1 - compile Darknet with OpenCV for using mosaic=1 \n");
-        exit(0);
+        error("mosaic=1 - compile Darknet with OpenCV for using mosaic=1", DARKNET_LOC);
     }
     int mixup = use_mixup ? random_gen() % 2 : 0;
     //printf("\n mixup = %d \n", mixup);
@@ -1451,9 +1444,12 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
 
                 r_scale = random_float();
 
-                dhue = rand_uniform_strong(-hue, hue);
-                dsat = rand_scale(saturation);
-                dexp = rand_scale(exposure);
+                if (!contrastive || contrastive_color || i % 2 == 0)
+                {
+                    dhue = rand_uniform_strong(-hue, hue);
+                    dsat = rand_scale(saturation);
+                    dexp = rand_scale(exposure);
+                }
             }
 
             int pleft = rand_precalc_random(-dw, dw, r1);
@@ -1552,8 +1548,7 @@ data load_data_detection(int n, char **paths, int m, int w, int h, int c, int bo
                     show_image(sized, buff);
                     wait_until_press_key_cv();
                 }
-                printf("\nYou use flag -show_imgs, so will be saved aug_...jpg images. Press Enter: \n");
-                //getchar();
+                printf("\nYou use flag -show_imgs, so will be saved aug_...jpg images\n");
             }
 
             free_image(orig);
@@ -1588,7 +1583,7 @@ void *load_thread(void *ptr)
         *a.d = load_data_region(a.n, a.paths, a.m, a.w, a.h, a.num_boxes, a.classes, a.jitter, a.hue, a.saturation, a.exposure);
     } else if (a.type == DETECTION_DATA){
         *a.d = load_data_detection(a.n, a.paths, a.m, a.w, a.h, a.c, a.num_boxes, a.truth_size, a.classes, a.flip, a.gaussian_noise, a.blur, a.mixup, a.jitter, a.resize,
-            a.hue, a.saturation, a.exposure, a.mini_batch, a.track, a.augment_speed, a.letter_box, a.mosaic_bound, a.contrastive, a.contrastive_jit_flip, a.show_imgs);
+            a.hue, a.saturation, a.exposure, a.mini_batch, a.track, a.augment_speed, a.letter_box, a.mosaic_bound, a.contrastive, a.contrastive_jit_flip, a.contrastive_color, a.show_imgs);
     } else if (a.type == SWAG_DATA){
         *a.d = load_data_swag(a.paths, a.n, a.classes, a.jitter);
     } else if (a.type == COMPARE_DATA){
@@ -1611,7 +1606,7 @@ pthread_t load_data_in_thread(load_args args)
     pthread_t thread;
     struct load_args* ptr = (load_args*)xcalloc(1, sizeof(struct load_args));
     *ptr = args;
-    if(pthread_create(&thread, 0, load_thread, ptr)) error("Thread creation failed");
+    if(pthread_create(&thread, 0, load_thread, ptr)) error("Thread creation failed", DARKNET_LOC);
     return thread;
 }
 
@@ -1668,7 +1663,7 @@ void *load_threads(void *ptr)
         for (i = 0; i < args.threads; ++i) {
             int* ptr = (int*)xcalloc(1, sizeof(int));
             *ptr = i;
-            if (pthread_create(&threads[i], 0, run_thread_loop, ptr)) error("Thread creation failed");
+            if (pthread_create(&threads[i], 0, run_thread_loop, ptr)) error("Thread creation failed", DARKNET_LOC);
         }
     }
 
@@ -1732,7 +1727,7 @@ pthread_t load_data(load_args args)
     pthread_t thread;
     struct load_args* ptr = (load_args*)xcalloc(1, sizeof(struct load_args));
     *ptr = args;
-    if(pthread_create(&thread, 0, load_threads, ptr)) error("Thread creation failed");
+    if(pthread_create(&thread, 0, load_threads, ptr)) error("Thread creation failed", DARKNET_LOC);
     return thread;
 }
 

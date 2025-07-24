@@ -245,6 +245,11 @@ network make_network(int n)
     net.n = n;
     net.layers = (layer*)xcalloc(net.n, sizeof(layer));
     net.seen = (uint64_t*)xcalloc(1, sizeof(uint64_t));
+    net.cuda_graph_ready = (int*)xcalloc(1, sizeof(int));
+    net.badlabels_reject_threshold = (float*)xcalloc(1, sizeof(float));
+    net.delta_rolling_max = (float*)xcalloc(1, sizeof(float));
+    net.delta_rolling_avg = (float*)xcalloc(1, sizeof(float));
+    net.delta_rolling_std = (float*)xcalloc(1, sizeof(float));
     net.cur_iteration = (int*)xcalloc(1, sizeof(int));
     net.total_bbox = (int*)xcalloc(1, sizeof(int));
     net.rewritten_bbox = (int*)xcalloc(1, sizeof(int));
@@ -268,7 +273,7 @@ void forward_network(network net, network_state state)
     for(i = 0; i < net.n; ++i){
         state.index = i;
         layer l = net.layers[i];
-        if(l.delta && state.train){
+        if(l.delta && state.train && l.train){
             scal_cpu(l.outputs * l.batch, 0, l.delta, 1);
         }
         //double time = get_time_point();
@@ -292,6 +297,7 @@ void update_network(network net)
     float rate = get_current_rate(net);
     for(i = 0; i < net.n; ++i){
         layer l = net.layers[i];
+        if (l.train == 0) continue;
         if(l.update){
             l.update(l, update_batch, rate, net.momentum, net.decay);
         }
@@ -421,6 +427,45 @@ float train_network_waitkey(network net, data d, int wait_key)
 #else   // GPU
     update_network(net);
 #endif  // GPU
+
+    int ema_start_point = net.max_batches / 2;
+
+    if (net.ema_alpha && (*net.cur_iteration) >= ema_start_point)
+    {
+        int ema_period = (net.max_batches - ema_start_point - 1000) * (1.0 - net.ema_alpha);
+        int ema_apply_point = net.max_batches - 1000;
+
+        if (!is_ema_initialized(net))
+        {
+            ema_update(net, 0); // init EMA
+            printf(" EMA initialization \n");
+        }
+
+        if ((*net.cur_iteration) == ema_apply_point)
+        {
+            ema_apply(net); // apply EMA (BN rolling mean/var recalculation is required)
+            printf(" ema_apply() \n");
+        }
+        else
+        if ((*net.cur_iteration) < ema_apply_point)// && (*net.cur_iteration) % ema_period == 0)
+        {
+            ema_update(net, net.ema_alpha); // update EMA
+            printf(" ema_update(), ema_alpha = %f \n", net.ema_alpha);
+        }
+    }
+
+
+    int reject_stop_point = net.max_batches*3/4;
+
+    if ((*net.cur_iteration) < reject_stop_point &&
+        net.weights_reject_freq &&
+        (*net.cur_iteration) % net.weights_reject_freq == 0)
+    {
+        float sim_threshold = 0.4;
+        reject_similar_weights(net, sim_threshold);
+    }
+
+
     free(X);
     free(y);
     return (float)sum/(n*batch);
@@ -594,7 +639,7 @@ int resize_network(network *net, int w, int h)
             resize_cost_layer(&l, inputs);
         }else{
             fprintf(stderr, "Resizing type %d \n", (int)l.type);
-            error("Cannot resize this type of layer");
+            error("Cannot resize this type of layer", DARKNET_LOC);
         }
         if(l.workspace_size > workspace_size) workspace_size = l.workspace_size;
         inputs = l.outputs;
@@ -731,6 +776,21 @@ float *network_predict(network net, float *input)
     return out;
 }
 
+#ifdef CUDA_OPENGL_INTEGRATION
+float *network_predict_gl_texture(network *net, uint32_t texture_id)
+{
+    if(net->batch != 1) {
+        set_batch_network(net, 1);
+    }
+
+    if(gpu_index >= 0) {
+        return network_predict_gpu_gl_texture(*net, texture_id);
+    }
+
+    return NULL;
+}
+#endif // CUDA_OPENGL_INTEGRATION
+
 int num_detections(network *net, float thresh)
 {
     int i;
@@ -840,7 +900,13 @@ void custom_get_region_detections(layer l, int w, int h, int net_w, int net_h, f
         dets[j].classes = l.classes;
         dets[j].bbox = boxes[j];
         dets[j].objectness = 1;
+        float highest_prob = 0;
+        dets[j].best_class_idx = -1;
         for (i = 0; i < l.classes; ++i) {
+            if (probs[j][i] > highest_prob) {
+                highest_prob = probs[j][i];
+                dets[j].best_class_idx = i;
+            }
             dets[j].prob[i] = probs[j][i];
         }
     }
@@ -982,7 +1048,7 @@ char *detection_to_json(detection *dets, int nboxes, int classes, char **names, 
                 send_buf = (char *)realloc(send_buf, total_len * sizeof(char));
                 if (!send_buf) {
                     if (buf) free(buf);
-                    return 0;// exit(-1);
+                    return 0;
                 }
                 strcat(send_buf, buf);
                 free(buf);
@@ -1181,6 +1247,11 @@ void free_network(network net)
     free(net.scales);
     free(net.steps);
     free(net.seen);
+    free(net.cuda_graph_ready);
+    free(net.badlabels_reject_threshold);
+    free(net.delta_rolling_max);
+    free(net.delta_rolling_avg);
+    free(net.delta_rolling_std);
     free(net.cur_iteration);
     free(net.total_bbox);
     free(net.rewritten_bbox);
@@ -1409,6 +1480,7 @@ void copy_weights_net(network net_train, network *net_map)
         }
         net_map->layers[k].batch = 1;
         net_map->layers[k].steps = 1;
+        net_map->layers[k].train = 0;
     }
 }
 
@@ -1479,5 +1551,140 @@ void restore_network_recurrent_state(network net)
     for (k = 0; k < net.n; ++k) {
         if (net.layers[k].type == CONV_LSTM) restore_state_conv_lstm(net.layers[k]);
         if (net.layers[k].type == CRNN) free_state_crnn(net.layers[k]);
+    }
+}
+
+
+int is_ema_initialized(network net)
+{
+    int i;
+    for (i = 0; i < net.n; ++i) {
+        layer l = net.layers[i];
+        if (l.type == CONVOLUTIONAL) {
+            int k;
+            if (l.weights_ema) {
+                for (k = 0; k < l.nweights; ++k) {
+                    if (l.weights_ema[k] != 0) return 1;
+                }
+            }
+        }
+    }
+
+    return 0;
+}
+
+void ema_update(network net, float ema_alpha)
+{
+    int i;
+    for (i = 0; i < net.n; ++i) {
+        layer l = net.layers[i];
+        if (l.type == CONVOLUTIONAL) {
+#ifdef GPU
+            if (gpu_index >= 0) {
+                pull_convolutional_layer(l);
+            }
+#endif
+            int k;
+            if (l.weights_ema) {
+                for (k = 0; k < l.nweights; ++k) {
+                    l.weights_ema[k] = ema_alpha * l.weights_ema[k] + (1 - ema_alpha) * l.weights[k];
+                }
+            }
+
+            for (k = 0; k < l.n; ++k) {
+                if (l.biases_ema) l.biases_ema[k] = ema_alpha * l.biases_ema[k] + (1 - ema_alpha) * l.biases[k];
+                if (l.scales_ema) l.scales_ema[k] = ema_alpha * l.scales_ema[k] + (1 - ema_alpha) * l.scales[k];
+            }
+        }
+    }
+}
+
+
+void ema_apply(network net)
+{
+    int i;
+    for (i = 0; i < net.n; ++i) {
+        layer l = net.layers[i];
+        if (l.type == CONVOLUTIONAL) {
+            int k;
+            if (l.weights_ema) {
+                for (k = 0; k < l.nweights; ++k) {
+                    l.weights[k] = l.weights_ema[k];
+                }
+            }
+
+            for (k = 0; k < l.n; ++k) {
+                if (l.biases_ema) l.biases[k] = l.biases_ema[k];
+                if (l.scales_ema) l.scales[k] = l.scales_ema[k];
+            }
+
+#ifdef GPU
+            if (gpu_index >= 0) {
+                push_convolutional_layer(l);
+            }
+#endif
+        }
+    }
+}
+
+
+
+void reject_similar_weights(network net, float sim_threshold)
+{
+    int i;
+    for (i = 0; i < net.n; ++i) {
+        layer l = net.layers[i];
+        if (i == 0) continue;
+        if (net.n > i + 1) if (net.layers[i + 1].type == YOLO) continue;
+        if (net.n > i + 2) if (net.layers[i + 2].type == YOLO) continue;
+        if (net.n > i + 3) if (net.layers[i + 3].type == YOLO) continue;
+
+        if (l.type == CONVOLUTIONAL && l.activation != LINEAR) {
+#ifdef GPU
+            if (gpu_index >= 0) {
+                pull_convolutional_layer(l);
+            }
+#endif
+            int k, j;
+            float max_sim = -1000;
+            int max_sim_index = 0;
+            int max_sim_index2 = 0;
+            int filter_size = l.size*l.size*l.c;
+            for (k = 0; k < l.n; ++k)
+            {
+                for (j = k+1; j < l.n; ++j)
+                {
+                    int w1 = k;
+                    int w2 = j;
+
+                    float sim = cosine_similarity(&l.weights[filter_size*w1], &l.weights[filter_size*w2], filter_size);
+                    if (sim > max_sim) {
+                        max_sim = sim;
+                        max_sim_index = w1;
+                        max_sim_index2 = w2;
+                    }
+                }
+            }
+
+            printf(" reject_similar_weights: i = %d, l.n = %d, w1 = %d, w2 = %d, sim = %f, thresh = %f \n",
+                i, l.n, max_sim_index, max_sim_index2, max_sim, sim_threshold);
+
+            if (max_sim > sim_threshold) {
+                printf(" rejecting... \n");
+                float scale = sqrt(2. / (l.size*l.size*l.c / l.groups));
+
+                for (k = 0; k < filter_size; ++k) {
+                    l.weights[max_sim_index*filter_size + k] = scale*rand_uniform(-1, 1);
+                }
+                if (l.biases) l.biases[max_sim_index] = 0.0f;
+                if (l.scales) l.scales[max_sim_index] = 1.0f;
+            }
+
+#ifdef GPU
+            if (gpu_index >= 0) {
+                push_convolutional_layer(l);
+            }
+#endif
+        }
     }
 }

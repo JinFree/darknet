@@ -2,7 +2,6 @@ import argparse
 import os
 import glob
 import random
-import darknet
 import time
 import cv2
 import numpy as np
@@ -79,7 +78,7 @@ def load_images(images_path):
             glob.glob(os.path.join(images_path, "*.jpeg"))
 
 
-def prepare_batch(images, network, channels=3):
+def prepare_batch(images, network):
     width = darknet.network_width(network)
     height = darknet.network_height(network)
 
@@ -93,24 +92,26 @@ def prepare_batch(images, network, channels=3):
 
     batch_array = np.concatenate(darknet_images, axis=0)
     batch_array = np.ascontiguousarray(batch_array.flat, dtype=np.float32)/255.0
-    darknet_images = batch_array.ctypes.data_as(darknet.POINTER(darknet.c_float))
-    return darknet.IMAGE(width, height, channels, darknet_images)
+    return batch_array
 
-
-def image_detection(image_path, network, class_names, class_colors, thresh):
+def image_detection(image_or_path, network, class_names, class_colors, thresh):
     # Darknet doesn't accept numpy images.
     # Create one with image we reuse for each detect
     width = darknet.network_width(network)
     height = darknet.network_height(network)
     darknet_image = darknet.make_image(width, height, 3)
 
-    image = cv2.imread(image_path)
+    if isinstance(image_or_path, str):
+        image = cv2.imread(image_or_path)
+    else:
+        image = image_or_path
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     image_resized = cv2.resize(image_rgb, (width, height),
                                interpolation=cv2.INTER_LINEAR)
 
     darknet.copy_image_from_bytes(darknet_image, image_resized.tobytes())
     detections = darknet.detect_image(network, class_names, darknet_image, thresh=thresh)
+    darknet.free_image(darknet_image)
     image = darknet.draw_boxes(detections, image_resized, class_colors)
     return cv2.cvtColor(image, cv2.COLOR_BGR2RGB), detections
 
@@ -118,7 +119,9 @@ def image_detection(image_path, network, class_names, class_colors, thresh):
 def batch_detection(network, images, class_names, class_colors,
                     thresh=0.25, hier_thresh=.5, nms=.45, batch_size=4):
     image_height, image_width, _ = check_batch_shape(images, batch_size)
-    darknet_images = prepare_batch(images, network)
+    batch_array = prepare_batch(images, network)
+    batch_array = batch_array.ctypes.data_as(darknet.POINTER(darknet.c_float))
+    darknet_images = darknet.IMAGE(image_width, image_height, 3, batch_array)
     batch_detections = darknet.network_predict_batch(network, darknet_images, batch_size, image_width,
                                                      image_height, thresh, hier_thresh, None, 0, 0)
     batch_predictions = []
@@ -134,12 +137,26 @@ def batch_detection(network, images, class_names, class_colors,
     return images, batch_predictions
 
 
+def image_classification(image, network, class_names):
+    width = darknet.network_width(network)
+    height = darknet.network_height(network)
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    image_resized = cv2.resize(image_rgb, (width, height),
+                                interpolation=cv2.INTER_LINEAR)
+    darknet_image = darknet.make_image(width, height, 3)
+    darknet.copy_image_from_bytes(darknet_image, image_resized.tobytes())
+    detections = darknet.predict_image(network, darknet_image)
+    predictions = [(name, detections[idx]) for idx, name in enumerate(class_names)]
+    darknet.free_image(darknet_image)
+    return sorted(predictions, key=lambda x: -x[1])
+
+
 def convert2relative(image, bbox):
     """
     YOLO format use relative coordinates for annotation
     """
     x, y, w, h = bbox
-    width, height, _ = image.shape
+    height, width, _ = image.shape
     return x/width, y/height, w/width, h/height
 
 
@@ -147,7 +164,7 @@ def save_annotations(name, image, detections, class_names):
     """
     Files saved with image_name.txt and relative coordinates
     """
-    file_name = name.split(".")[:-1][0] + ".txt"
+    file_name = os.path.splitext(name)[0] + ".txt"
     with open(file_name, "w") as f:
         for label, confidence, bbox in detections:
             x, y, w, h = convert2relative(image, bbox)

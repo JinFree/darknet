@@ -13,15 +13,12 @@
 
 #ifndef STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include <stb_image.h>
 #endif
 #ifndef STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
+#include <stb_image_write.h>
 #endif
-
-extern int check_mistakes;
-//int windows = 0;
 
 float colors[6][3] = { {1,0,1}, {0,0,1},{0,1,1},{0,1,0},{1,1,0},{1,0,0} };
 
@@ -278,6 +275,19 @@ image **load_alphabet()
         }
     }
     return alphabets;
+}
+
+void free_alphabet(image **alphabet)
+{
+    int i, j;
+    const int nsize = 8;
+    for (j = 0; j < nsize; ++j) {
+        for (i = 32; i < 127; ++i) {
+            free_image(alphabet[j][i]);
+        }
+        free(alphabet[j]);
+    }
+    free(alphabet);
 }
 
 
@@ -705,7 +715,7 @@ void show_image(image p, const char *name)
 #ifdef OPENCV
     show_image_cv(p, name);
 #else
-    fprintf(stderr, "Not compiled with OpenCV, saving to %s.png instead\n", name);
+    fprintf(stderr, "Not compiled with OpenCV, saving to %s.jpg instead\n", name);
     save_image(p, name);
 #endif  // OPENCV
 }
@@ -1351,7 +1361,7 @@ void make_image_red(image im)
     }
 }
 
-image make_attention_image(int img_size, float *original_delta_cpu, float *original_input_cpu, int w, int h, int c)
+image make_attention_image(int img_size, float *original_delta_cpu, float *original_input_cpu, int w, int h, int c, float alpha)
 {
     image attention_img;
     attention_img.w = w;
@@ -1379,7 +1389,7 @@ image make_attention_image(int img_size, float *original_delta_cpu, float *origi
     image resized = resize_image(attention_img, w / 4, h / 4);
     attention_img = resize_image(resized, w, h);
     free_image(resized);
-    for (k = 0; k < img_size; ++k) attention_img.data[k] += original_input_cpu[k];
+    for (k = 0; k < img_size; ++k) attention_img.data[k] = attention_img.data[k]*alpha + (1-alpha)*original_input_cpu[k];
 
     //normalize_image(attention_img);
     //show_image(attention_img, "delta");
@@ -1498,12 +1508,7 @@ image load_image_stb(char *filename, int channels)
         char *new_line = "\n";
         fwrite(new_line, sizeof(char), strlen(new_line), fw);
         fclose(fw);
-        if (check_mistakes) {
-            printf("\n Error in load_image_stb() \n");
-            getchar();
-        }
         return make_image(10, 10, 3);
-        //exit(EXIT_FAILURE);
     }
     if(channels) c = channels;
     int i,j,k;
@@ -1523,7 +1528,7 @@ image load_image_stb(char *filename, int channels)
 
 image load_image_stb_resize(char *filename, int w, int h, int c)
 {
-    image out = load_image_stb(filename, c);    // without OpenCV
+    image out = load_image_stb(filename, c);
 
     if ((h && w) && (h != out.h || w != out.w)) {
         image resized = resize_image(out, w, h);
@@ -1536,10 +1541,9 @@ image load_image_stb_resize(char *filename, int w, int h, int c)
 image load_image(char *filename, int w, int h, int c)
 {
 #ifdef OPENCV
-    //image out = load_image_stb(filename, c);
     image out = load_image_cv(filename, c);
 #else
-    image out = load_image_stb(filename, c);    // without OpenCV
+    image out = load_image_stb(filename, c);
 #endif  // OPENCV
 
     if((h && w) && (h != out.h || w != out.w)){

@@ -4,11 +4,14 @@
 *.csv
 *.out
 *.png
+*.jpg
 *.so
 *.exe
 *.dll
 *.lib
 *.dylib
+*.pyc
+*.bak
 mnist/
 data/
 caffe/
@@ -19,8 +22,13 @@ convnet/
 decaf/
 submission/
 cfg/
+temp/
 build/darknet/*
 build_*/
+debug/
+ninja/
+ninja.zip
+vcpkg_installed/
 !build/darknet/YoloWrapper.cs
 .fuse*
 *.weights
@@ -33,6 +41,11 @@ build/detect_cuda_compute_capabilities.cu
 build/.ninja_deps
 build/.ninja_log
 build/Makefile
+CMakeFiles/
+CMakeCache.txt
+*/vcpkg-manifest-install.log
+build.log
+__pycache__/
 
 # OS Generated #
 .DS_Store*
@@ -55,3 +68,5 @@ include/darknet/
 uselib
 uselib_track
 darknet
+kmeansiou
+vcpkg/

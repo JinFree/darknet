@@ -27,7 +27,7 @@ void demo_art(char *cfgfile, char *weightfile, int cam_index)
     cap = get_capture_webcam(cam_index);
 
     char *window = "ArtJudgementBot9000!!!";
-    if(!cap) error("Couldn't connect to webcam.\n");
+    if(!cap) error("Couldn't connect to webcam.", DARKNET_LOC);
     create_window_cv(window, 0, 512, 512);
     int i;
     int idx[] = {37, 401, 434};
@@ -40,8 +40,7 @@ void demo_art(char *cfgfile, char *weightfile, int cam_index)
 
         float *p = network_predict(net, in_s.data);
 
-        printf("\033[2J");
-        printf("\033[1;1H");
+        printf("\033[H\033[J");
 
         float score = 0;
         for(i = 0; i < n; ++i){
@@ -51,7 +50,7 @@ void demo_art(char *cfgfile, char *weightfile, int cam_index)
         score = score;
         printf("I APPRECIATE THIS ARTWORK: %10.7f%%\n", score*100);
         printf("[");
-	int upper = 30;
+    int upper = 30;
         for(i = 0; i < upper; ++i){
             printf("%c", ((i+.5) < score*upper) ? 219 : ' ');
         }

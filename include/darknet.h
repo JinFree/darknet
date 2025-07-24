@@ -192,7 +192,8 @@ typedef enum {
     L2NORM,
     EMPTY,
     BLANK,
-    CONTRASTIVE
+    CONTRASTIVE,
+    IMPLICIT
 } LAYER_TYPE;
 
 // layer.h
@@ -389,6 +390,8 @@ struct layer {
     float * rand;
     float * cost;
     int *labels;
+    int *class_ids;
+    int contrastive_neg_max;
     float *cos_sim;
     float *exp_cos_sim;
     float *p_constrastive;
@@ -412,11 +415,17 @@ struct layer {
     float *scales;
     float *scale_updates;
 
+    float *weights_ema;
+    float *biases_ema;
+    float *scales_ema;
+
     float *weights;
     float *weight_updates;
 
     float scale_x_y;
     int objectness_smooth;
+    int new_coords;
+    int show_details;
     float max_delta;
     float uc_normalizer;
     float iou_normalizer;
@@ -548,6 +557,9 @@ struct layer {
 
 //#ifdef GPU
     int *indexes_gpu;
+
+    int stream;
+    int wait_stream_id;
 
     float *z_gpu;
     float *r_gpu;
@@ -693,6 +705,15 @@ typedef struct network {
     int n;
     int batch;
     uint64_t *seen;
+    float *badlabels_reject_threshold;
+    float *delta_rolling_max;
+    float *delta_rolling_avg;
+    float *delta_rolling_std;
+    int weights_reject_freq;
+    int equidistant_point;
+    float badlabels_rejection_percentage;
+    float num_sigmas_reject_badlabels;
+    float ema_alpha;
     int *cur_iteration;
     float loss_scale;
     int *t;
@@ -749,13 +770,14 @@ typedef struct network {
     float label_smooth_eps;
     int resize_step;
     int attention;
-    int adversarial;    
+    int adversarial;
     float adversarial_lr;
     float max_chart_loss;
     int letter_box;
     int mosaic_bound;
     int contrastive;
     int contrastive_jit_flip;
+    int contrastive_color;
     int unsupervised;
     float angle;
     float aspect;
@@ -799,6 +821,11 @@ typedef struct network {
     size_t *max_input16_size;
     size_t *max_output16_size;
     int wait_stream;
+
+    void *cuda_graph;
+    void *cuda_graph_exec;
+    int use_cuda_graph;
+    int *cuda_graph_ready;
 
     float *global_delta_gpu;
     float *state_delta_gpu;
@@ -872,6 +899,7 @@ typedef struct ious {
 typedef struct detection{
     box bbox;
     int classes;
+    int best_class_idx;
     float *prob;
     float *mask;
     float objectness;
@@ -881,7 +909,7 @@ typedef struct detection{
     float *embeddings;  // embeddings for tracking
     int embedding_size;
     float sim;
-    int track_id;    
+    int track_id;
 } detection;
 
 // network.c -batch inference
@@ -943,6 +971,7 @@ typedef struct load_args {
     int dontuse_opencv;
     int contrastive;
     int contrastive_jit_flip;
+    int contrastive_color;
     float jitter;
     float resize;
     int flip;
@@ -989,7 +1018,6 @@ typedef struct box_label {
 // parser.c
 LIB_API network *load_network(char *cfg, char *weights, int clear);
 LIB_API network *load_network_custom(char *cfg, char *weights, int clear, int batch);
-LIB_API network *load_network(char *cfg, char *weights, int clear);
 LIB_API void free_network(network net);
 LIB_API void free_network_ptr(network* net);
 
@@ -1004,6 +1032,11 @@ LIB_API void diounms_sort(detection *dets, int total, int classes, float thresh,
 // network.h
 LIB_API float *network_predict(network net, float *input);
 LIB_API float *network_predict_ptr(network *net, float *input);
+#ifdef CUDA_OPENGL_INTEGRATION
+LIB_API float *network_predict_gl_texture(network *net, uint32_t texture_id);
+#endif // CUDA_OPENGL_INTEGRATION
+
+LIB_API void set_batch_network(network *net, int b);
 LIB_API detection *get_network_boxes(network *net, int w, int h, float thresh, float hier, int *map, int relative, int *num, int letter);
 LIB_API det_num_pair* network_predict_batch(network *net, image im, int batch_size, int w, int h, float thresh, float hier, int *map, int relative, int letter);
 LIB_API void free_detections(detection *dets, int n);
@@ -1019,7 +1052,7 @@ LIB_API void reset_rnn(network *net);
 LIB_API float *network_predict_image(network *net, image im);
 LIB_API float *network_predict_image_letterbox(network *net, image im);
 LIB_API float validate_detector_map(char *datacfg, char *cfgfile, char *weightfile, float thresh_calc_avg_iou, const float iou_thresh, const int map_points, int letter_box, network *existing_net);
-LIB_API void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, int mjpeg_port, int show_imgs, int benchmark_layers, char* chart_path);
+LIB_API void train_detector(char *datacfg, char *cfgfile, char *weightfile, int *gpus, int ngpus, int clear, int dont_show, int calc_map, float thresh, float iou_thresh, int mjpeg_port, int show_imgs, int benchmark_layers, char* chart_path, int mAP_epochs);
 LIB_API void test_detector(char *datacfg, char *cfgfile, char *weightfile, char *filename, float thresh,
     float hier_thresh, int dont_show, int ext_output, int save_labels, char *outfile, int letter_box, int benchmark_layers);
 LIB_API int network_width(network *net);
@@ -1028,7 +1061,7 @@ LIB_API void optimize_picture(network *net, image orig, int max_layer, float sca
 
 // image.h
 LIB_API void make_image_red(image im);
-LIB_API image make_attention_image(int img_size, float *original_delta_cpu, float *original_input_cpu, int w, int h, int c);
+LIB_API image make_attention_image(int img_size, float *original_delta_cpu, float *original_input_cpu, int w, int h, int c, float alpha);
 LIB_API image resize_image(image im, int w, int h);
 LIB_API void quantize_image(image im);
 LIB_API void copy_image_from_bytes(image im, char *pdata);

@@ -15,6 +15,7 @@ route_layer make_route_layer(int batch, int n, int *input_layers, int *input_siz
     l.input_sizes = input_sizes;
     l.groups = groups;
     l.group_id = group_id;
+    l.wait_stream_id = -1;
     int i;
     int outputs = 0;
     for(i = 0; i < n; ++i){
@@ -58,8 +59,7 @@ void resize_route_layer(route_layer *l, network *net)
             l->out_c += next.out_c;
         }else{
             printf("Error: Different size of input layers: %d x %d, %d x %d\n", next.out_w, next.out_h, first.out_w, first.out_h);
-            l->out_h = l->out_w = l->out_c = 0;
-            exit(EXIT_FAILURE);
+            error("Error!", DARKNET_LOC);
         }
     }
     l->out_c = l->out_c / l->groups;
@@ -116,6 +116,14 @@ void backward_route_layer(const route_layer l, network_state state)
 #ifdef GPU
 void forward_route_layer_gpu(const route_layer l, network_state state)
 {
+    if (l.stream >= 0) {
+        switch_stream(l.stream);
+    }
+
+    if (l.wait_stream_id >= 0) {
+        wait_stream(l.wait_stream_id);
+    }
+
     int i, j;
     int offset = 0;
     for(i = 0; i < l.n; ++i){
